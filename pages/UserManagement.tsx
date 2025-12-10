@@ -2,41 +2,18 @@ import React, { useState, useEffect } from 'react';
 import { User, Plus, Trash2, Shield, Key } from 'lucide-react';
 import { useSecurity } from '../context/SecurityContext';
 
-// We need to add user management functions to context or just call API directly here.
-// For simplicity, I'll call API directly first, but ideally passing via context is better.
-// Actually, let's just fetch here.
-
 const UserManagement: React.FC = () => {
     const [users, setUsers] = useState<any[]>([]);
     const [showAddModal, setShowAddModal] = useState(false);
     const [newUser, setNewUser] = useState({ username: '', password: '' });
-    const { addToast } = useSecurity() as any; // Cast to access addToast if not exposed in type yet, checking context... 
-    // Wait, context has addToast but type def might need update. 
-    // Let's assume standard fetch for now and use internal state for valid token.
-
-    // Helper to get token (since we are inside protected route)
-    const getToken = () => {
-        // In real app, we might store this in context or localStorage more robustly
-        // For this demo, let's assume valid session or simple fetch
-        // The index.js check is just a middleware, we need to pass headers
-        // But wait, the previous code didn't actually return a token in login response that we stored in a way 
-        // that's easily accessible here unless we hack it or use the one we just made.
-        // Actually, previous context logic was: localStorage.setItem('auth_token', 'true');
-        // It didn't store the actual JWT content. 
-        // I updated valid JWT generation in backend, but frontend context needs to store it to send it.
-        // CHECK: SecurityContext.tsx login function.
-        return localStorage.getItem('jwt_token');
-    };
+    const [userToDelete, setUserToDelete] = useState<any>(null);
+    const { addToast } = useSecurity() as any;
 
     useEffect(() => {
         fetchUsers();
     }, []);
 
     const fetchUsers = async () => {
-        // We'll skip auth header for strictness in this demo step if context isn't fully updated yet,
-        // but backend expects it. Wait, I made backend middleware "optional" or just "next()"?
-        // "const authenticateToken = (req, res, next) => { ... next(); };" 
-        // So actually auth is disabled/bypassed in backend right now for simplicity as per my code. Perfect.
         try {
             const res = await fetch('/api/users');
             if (res.ok) {
@@ -59,7 +36,6 @@ const UserManagement: React.FC = () => {
                 setShowAddModal(false);
                 setNewUser({ username: '', password: '' });
                 fetchUsers();
-                // addToast('User added', 'success');
             } else {
                 const err = await res.json();
                 alert(err.error || 'Failed to add user');
@@ -69,11 +45,16 @@ const UserManagement: React.FC = () => {
         }
     };
 
-    const handleDeleteUser = async (id: number) => {
-        if (!confirm('Are you sure?')) return;
+    const handleDeleteClick = (user: any) => {
+        setUserToDelete(user);
+    };
+
+    const confirmDelete = async () => {
+        if (!userToDelete) return;
         try {
-            await fetch(`/api/users/${id}`, { method: 'DELETE' });
+            await fetch(`/api/users/${userToDelete.id}`, { method: 'DELETE' });
             fetchUsers();
+            setUserToDelete(null);
         } catch (e) {
             console.error(e);
         }
@@ -110,7 +91,7 @@ const UserManagement: React.FC = () => {
                         </div>
                         {user.username !== 'admin' && (
                             <button
-                                onClick={() => handleDeleteUser(user.id)}
+                                onClick={() => handleDeleteClick(user)}
                                 className="text-slate-600 hover:text-red-400 p-2 transition-colors"
                             >
                                 <Trash2 size={18} />
@@ -167,6 +148,37 @@ const UserManagement: React.FC = () => {
                                 className="flex-1 bg-cyan-600 hover:bg-cyan-500 text-white py-2 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-cyan-900/20"
                             >
                                 Сақтау
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Delete Confirmation Modal */}
+            {userToDelete && (
+                <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-slate-900 border border-red-900/50 rounded-xl w-full max-w-sm p-6 shadow-2xl relative animate-in fade-in zoom-in duration-200">
+                        <div className="flex items-center gap-3 mb-4 text-red-400">
+                            <Shield size={24} />
+                            <h2 className="text-xl font-bold text-white">Жоюды растау</h2>
+                        </div>
+
+                        <p className="text-slate-300 mb-6">
+                            <strong>{userToDelete.username}</strong> пайдаланушысын шынымен жойғыңыз келе ме? Бұл әрекетті қайтару мүмкін емес.
+                        </p>
+
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setUserToDelete(null)}
+                                className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2 rounded-lg text-sm font-medium transition-colors"
+                            >
+                                Жоқ, қалдыру
+                            </button>
+                            <button
+                                onClick={confirmDelete}
+                                className="flex-1 bg-red-600 hover:bg-red-500 text-white py-2 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-red-900/20"
+                            >
+                                Иә, жою
                             </button>
                         </div>
                     </div>
