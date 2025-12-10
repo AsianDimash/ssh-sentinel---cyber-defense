@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import geoip from 'geoip-lite';
+import TelegramBot from 'node-telegram-bot-api';
 import { openDb, initDb } from './db.js';
 
 const app = express();
@@ -18,6 +19,22 @@ app.use(express.json());
 
 // Initialize DB
 initDb();
+
+// --- TELEGRAM HELPER ---
+const sendTelegramAlert = async (message) => {
+    try {
+        const db = await openDb();
+        const token = await db.get('SELECT value FROM settings WHERE key = ?', ['telegram_bot_token']);
+        const chatId = await db.get('SELECT value FROM settings WHERE key = ?', ['telegram_chat_id']);
+
+        if (token && chatId && token.value && chatId.value) {
+            const bot = new TelegramBot(token.value, { polling: false });
+            await bot.sendMessage(chatId.value, message);
+        }
+    } catch (e) {
+        console.error('Failed to send Telegram alert:', e.message);
+    }
+};
 
 // Helper: Get client IP
 const getClientIp = (req) => {
@@ -79,8 +96,9 @@ const handleFailedAttempt = async (ip, username) => {
     // Check if we need to auto-block
     if (tracker.count >= MAX_FAILED_ATTEMPTS) {
         // Check if already blocked
-        const alreadyBlocked = await isIpBlocked(ip);
-        if (!alreadyBlocked) {
+        const existingBlock = await db.get('SELECT * FROM blocks WHERE ip = ?', [ip]);
+
+        if (!existingBlock) {
             // Add to blocks table
             const blockId = `auto-${now}`;
             await db.run(
@@ -107,7 +125,7 @@ const handleFailedAttempt = async (ip, username) => {
                     new Date().toISOString(),
                     country,
                     'BLOCKED',
-                    'Unknown ISP', // GeoIP might not give ISP, usually requires paid DB or different lookup
+                    'Unknown ISP',
                     Math.min(50 + tracker.count * 10, 100),
                     JSON.stringify(Array.from(tracker.usernames))
                 ]
@@ -129,10 +147,18 @@ const handleFailedAttempt = async (ip, username) => {
 
             console.log(`[SECURITY] IP ${ip} has been auto-blocked after ${tracker.count} failed attempts`);
 
+            // Send Telegram Alert
+            const alertMsg = `🚨 *SECURITY ALERT*\n\nIP Blocked: ${ip}\nReason: Brute-force (${tracker.count} attempts)\nCountry: ${country}`;
+            await sendTelegramAlert(alertMsg);
+
             // Reset counter for this IP
             delete failedAttempts[ip];
 
             return true; // Was blocked
+        } else {
+            // Already blocked, update timestamp if needed or just reset
+            delete failedAttempts[ip];
+            return true;
         }
     }
 
@@ -274,10 +300,21 @@ app.post('/api/blocks', authenticateToken, async (req, res) => {
     const { id, ip, reason, timestamp, duration, type } = req.body;
     const db = await openDb();
     try {
-        await db.run(
-            'INSERT INTO blocks (id, ip, reason, timestamp, duration, type) VALUES (?, ?, ?, ?, ?, ?)',
-            [id, ip, reason, timestamp, duration, type]
-        );
+        // Check if already blocked
+        const existing = await db.get('SELECT * FROM blocks WHERE ip = ?', [ip]);
+        if (existing) {
+            // Update existing block
+            await db.run(
+                'UPDATE blocks SET reason = ?, timestamp = ?, duration = ?, type = ? WHERE ip = ?',
+                [reason, timestamp, duration, type, ip]
+            );
+        } else {
+            // Insert new
+            await db.run(
+                'INSERT INTO blocks (id, ip, reason, timestamp, duration, type) VALUES (?, ?, ?, ?, ?, ?)',
+                [id, ip, reason, timestamp, duration, type]
+            );
+        }
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -288,41 +325,31 @@ app.post('/api/blocks', authenticateToken, async (req, res) => {
 app.delete('/api/blocks/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const db = await openDb();
-    await db.run('DELETE FROM blocks WHERE id = ?', [id]);
+
+    // Get the IP of the block first (to handle potential duplicates logic)
+    const block = await db.get('SELECT * FROM blocks WHERE id = ?', [id]);
+    if (block) {
+        await db.run('DELETE FROM blocks WHERE ip = ?', [block.ip]);
+    } else {
+        await db.run('DELETE FROM blocks WHERE id = ?', [id]);
+    }
+
     res.json({ success: true });
 });
 
-// Dashboard Stats - REAL DATA
+// Dashboard Stats
 app.get('/api/stats', authenticateToken, async (req, res) => {
     const db = await openDb();
-
-    // Get logs for the last 24 hours
-    // SQLite doesn't have great date functions, so filtering in JS is often easier for simple charts
-    // or using 'datetime' modifier if stored as ISO string.
-    // We updated logs to use ISO string in handleFailedAttempt, but old logs might be localeTimeString.
-    // Let's grab all logs and filter in JS to be safe with existing data mixture.
-
-    // In a prod app, you should consistently store ISODateString.
     const allLogs = await db.all(`SELECT * FROM logs`);
-
-    // Initialize hourly buckets (00:00 to 23:00)
     const hourlyCounts = new Array(24).fill(0);
 
-    // Current date for comparison (to only show 'today' or 'last 24h')
-    // Let's assume the chart wants a 24h distribution or distribution by hour of day (0-23)
-
     allLogs.forEach(log => {
-        // Try to parse timestamp
         let date;
         try {
-            // Check if it's ISO (e.g. 2023-10-27T...)
             if (log.timestamp.includes('T')) {
                 date = new Date(log.timestamp);
             } else {
-                // It might be locale string 'HH:MM:SS' from previous code
-                // This is hard to parse without a date, assume it's today
-                // Simple hack: if we can't parse it well, skip or count as current hour
-                date = new Date(); // fallback
+                date = new Date();
             }
         } catch (e) {
             date = new Date();
@@ -334,14 +361,10 @@ app.get('/api/stats', authenticateToken, async (req, res) => {
         }
     });
 
-    // Format for the frontend chart [ { time: '00:00', attempts: 5 }, ... ]
-    // We will pick a few representative points or return all 24 hours. 
-    // The frontend seems to expect specific intervals (4 hours).
     const chartData = [];
     const points = [0, 4, 8, 12, 16, 20];
 
     points.forEach(hour => {
-        // Sum the 4-hour block
         let sum = 0;
         for (let i = 0; i < 4; i++) {
             sum += hourlyCounts[hour + i] || 0;
@@ -353,6 +376,70 @@ app.get('/api/stats', authenticateToken, async (req, res) => {
     });
 
     res.json(chartData);
+});
+
+// --- USER MANAGEMENT ENDPOINTS ---
+
+// Get Users
+app.get('/api/users', authenticateToken, async (req, res) => {
+    const db = await openDb();
+    const users = await db.all('SELECT id, username FROM users');
+    res.json(users);
+});
+
+// Add User
+app.post('/api/users', authenticateToken, async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password required' });
+    }
+
+    const db = await openDb();
+    try {
+        await db.run('INSERT INTO users (username, password) VALUES (?, ?)', [username, password]);
+        res.json({ success: true });
+    } catch (e) {
+        if (e.message.includes('UNIQUE constraint failed')) {
+            res.status(400).json({ error: 'Username already exists' });
+        } else {
+            res.status(500).json({ error: e.message });
+        }
+    }
+});
+
+// Delete User
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const db = await openDb();
+    await db.run('DELETE FROM users WHERE id = ?', [id]);
+    res.json({ success: true });
+});
+
+// --- SETTINGS ENDPOINTS ---
+
+// Get Settings
+app.get('/api/settings', authenticateToken, async (req, res) => {
+    const db = await openDb();
+    const settings = await db.all('SELECT * FROM settings');
+    // Convert array [{key, value}, ...] to object {key: value}
+    const settingsObj = settings.reduce((acc, curr) => {
+        acc[curr.key] = curr.value;
+        return acc;
+    }, {});
+    res.json(settingsObj);
+});
+
+// Save Settings
+app.post('/api/settings', authenticateToken, async (req, res) => {
+    const { telegram_bot_token, telegram_chat_id } = req.body;
+    const db = await openDb();
+    try {
+        await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ['telegram_bot_token', telegram_bot_token]);
+        await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ['telegram_chat_id', telegram_chat_id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.listen(PORT, () => {

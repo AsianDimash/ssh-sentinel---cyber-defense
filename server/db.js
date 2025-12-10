@@ -61,6 +61,14 @@ export async function initDb() {
     )
   `);
 
+  // Create Settings Table (for Telegram)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `);
+
   // Seed Data if empty
   const incidentCount = await db.get('SELECT count(*) as count FROM incidents');
   if (incidentCount.count === 0) {
@@ -87,7 +95,7 @@ export async function initDb() {
 
   const userCount = await db.get('SELECT count(*) as count FROM users');
   if (userCount.count === 0) {
-    // Default admin user. Password should be hashed in production, but plain text for this demo as requested.
+    // Default admin user
     await db.run(`INSERT INTO users (username, password) VALUES ('admin', 'password')`);
   }
 
