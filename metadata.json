@@ -1,0 +1,5 @@
+{
+  "name": "SSH Sentinel - Cyber Defense",
+  "description": "A futuristic, cyber-themed dashboard for monitoring SSH brute-force attacks, managing incidents, and visualizing real-time security logs.",
+  "requestFramePermissions": []
+}
