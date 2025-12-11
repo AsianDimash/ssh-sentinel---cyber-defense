@@ -330,6 +330,10 @@ app.delete('/api/blocks/:id', authenticateToken, async (req, res) => {
     const block = await db.get('SELECT * FROM blocks WHERE id = ?', [id]);
     if (block) {
         await db.run('DELETE FROM blocks WHERE ip = ?', [block.ip]);
+        // Also clear from in-memory tracker so they can login immediately
+        if (failedAttempts[block.ip]) {
+            delete failedAttempts[block.ip];
+        }
     } else {
         await db.run('DELETE FROM blocks WHERE id = ?', [id]);
     }
